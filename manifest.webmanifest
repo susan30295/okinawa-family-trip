@@ -1,0 +1,18 @@
+{
+  "name": "沖繩家庭旅程",
+  "short_name": "沖繩旅程",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#fffdf8",
+  "theme_color": "#7fc49a",
+  "description": "給家人一起檢視、調整與分享沖繩旅行行程的 app。",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

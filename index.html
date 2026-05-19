@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#7fc49a" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="沖繩旅程" />
+    <title>沖繩家庭旅程</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="stylesheet" href="./styles.css?v=30" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Family Okinawa Trip</p>
+          <h1>沖繩家庭旅程</h1>
+        </div>
+        <div class="top-actions" aria-label="快速操作">
+          <button class="icon-button" id="largeTextBtn" type="button" title="切換字體大小">字</button>
+          <button class="icon-button" id="resetBtn" type="button" title="恢復範例">重置</button>
+        </div>
+        <a class="photo-credit" href="https://commons.wikimedia.org/wiki/File:Manzamo.jpg" target="_blank" rel="noreferrer">Photo: Fg2 / Public Domain</a>
+      </header>
+
+      <nav class="app-nav" aria-label="主要頁面">
+        <button class="primary" id="tripViewBtn" type="button">行程</button>
+        <button id="toolsViewBtn" type="button">旅途工具</button>
+      </nav>
+
+      <main class="layout">
+        <section class="panel schedule-panel" aria-label="行程表">
+          <div class="family-card">
+            <div>
+              <p class="muted">現在選取</p>
+              <h2 id="currentStopTitle">讀取中...</h2>
+              <p id="currentStopMeta">請稍候</p>
+            </div>
+            <button class="weather-chip" id="weatherToggle" type="button">晴天行程</button>
+          </div>
+          <div class="participant-strip">
+            <div>
+              <p class="muted">參與人員與定位</p>
+              <div class="family-dots" id="familyDots" aria-label="家人最後定位"></div>
+            </div>
+            <button id="editPeopleBtn" type="button">編輯人員</button>
+          </div>
+
+          <nav class="day-tabs" id="dayTabs" aria-label="選擇日期"></nav>
+
+          <div class="toolbar">
+            <button id="editDayBtn" type="button">編輯本日標題</button>
+            <button class="primary" id="addStopBtn" type="button">＋ 新增景點</button>
+            <button id="delayBtn" type="button">全日順延 15 分</button>
+            <button id="exportBtn" type="button">匯出分享</button>
+          </div>
+
+          <div class="timeline" id="timeline" aria-live="polite"></div>
+        </section>
+
+        <aside class="side-stack">
+          <section class="panel map-panel" aria-label="地圖與景點資訊">
+            <div class="section-head">
+              <div>
+                <p class="muted">地圖</p>
+                <h2 id="mapTitle">目的地位置</h2>
+              </div>
+              <button class="link-button open-link" id="mapLink" type="button" data-url="#">開啟定位</button>
+            </div>
+            <div class="map-wrap">
+              <iframe id="mapFrame" title="景點地圖" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>
+              <p class="map-fallback">若地圖尚未載入，請點「開啟定位」。</p>
+            </div>
+            <div class="detail-box" id="detailBox"></div>
+          </section>
+
+          <section class="panel stay-panel" aria-label="住宿資訊">
+            <div class="section-head">
+              <div>
+                <p class="muted">住宿</p>
+                <h2>今晚住哪裡</h2>
+              </div>
+              <div class="split-actions">
+                <button id="editHotelBtn" type="button">設定住宿</button>
+                <button class="link-button open-link" id="hotelMapLink" type="button" data-url="#">飯店定位</button>
+              </div>
+            </div>
+            <div id="hotelInfo"></div>
+          </section>
+
+          <section class="panel expense-panel" aria-label="花費與分賬">
+            <div class="section-head">
+              <div>
+                <p class="muted">花費</p>
+                <h2>分賬小幫手</h2>
+              </div>
+              <div class="split-actions">
+                <button id="addExpenseBtn" type="button">新增花費</button>
+              </div>
+            </div>
+            <div id="expenseSummary"></div>
+            <div id="expenseList"></div>
+          </section>
+
+          <section class="panel track-panel" aria-label="移動軌跡">
+            <div class="section-head">
+              <div>
+                <p class="muted">移動軌跡</p>
+                <h2>家人集合紀錄</h2>
+              </div>
+              <button id="trackBtn" type="button">開始記錄</button>
+            </div>
+            <div class="install-help">
+              <button id="installBtn" type="button">安裝到手機桌面</button>
+              <button id="configSyncBtn" type="button">設定雲端同步</button>
+              <button id="syncNowBtn" type="button">立即同步</button>
+              <input id="syncFileInput" type="file" accept=".json,.csv,application/json,text/csv" hidden />
+              <button id="locationHelpBtn" type="button">定位設定說明</button>
+            </div>
+            <p class="sync-status" id="syncStatus">離線可用；尚未設定 Supabase 時會先存在本機與 CSV。</p>
+            <div class="track-stats">
+              <span><strong id="trackCount">0</strong> 筆定位</span>
+              <span id="trackStatus">尚未開始</span>
+            </div>
+            <ol class="track-list" id="trackList"></ol>
+            <button class="quiet" id="clearTrackBtn" type="button">清除軌跡</button>
+          </section>
+
+        </aside>
+      </main>
+
+      <section class="panel tools-page" id="toolsPanel" aria-label="旅途工具">
+        <div class="section-head">
+          <div>
+            <p class="muted">旅途工具</p>
+            <h2>清單與緊急資訊</h2>
+          </div>
+        </div>
+        <details open>
+          <summary>行李清單</summary>
+          <div class="tool-list" id="packingList"></div>
+        </details>
+        <details>
+          <summary>藥品清單</summary>
+          <div class="tool-list" id="medsList"></div>
+        </details>
+        <details>
+          <summary>我的購物記帳</summary>
+          <form class="inline-form" id="shoppingForm">
+            <input id="shoppingPerson" type="text" placeholder="誰" />
+            <input id="shoppingTitle" type="text" placeholder="買什麼" />
+            <input id="shoppingAmount" type="number" min="0" step="1" placeholder="金額" />
+            <button class="primary" type="submit">新增</button>
+          </form>
+          <div class="tool-list" id="shoppingList"></div>
+        </details>
+        <details>
+          <summary>緊急資訊</summary>
+          <div class="emergency-list" id="emergencyList"></div>
+        </details>
+      </section>
+    </div>
+
+    <dialog id="stopDialog">
+      <form method="dialog" id="stopForm">
+        <div class="dialog-head">
+          <h2 id="dialogTitle">編輯行程</h2>
+          <button class="icon-button dialog-close" value="cancel" type="button" title="關閉">×</button>
+        </div>
+        <p class="form-note">標示「必填」的欄位建議填寫；若臨時不知道，可先存成草稿再回來補。</p>
+        <input type="hidden" id="stopId" />
+        <div class="form-section">
+          <label>
+            <span>日期</span>
+            <select id="stopDay"></select>
+          </label>
+          <label>
+            <span>時間 <em class="required-chip">必填</em></span>
+            <input id="stopTime" type="time" />
+          </label>
+          <label>
+            <span>行程名稱 <em class="required-chip">必填</em></span>
+            <input id="stopTitle" type="text" placeholder="例如：晚餐、景點、飯店集合" />
+          </label>
+        </div>
+        <div class="form-section">
+          <label>
+            <span>交通方式</span>
+            <input id="stopTransport" type="text" placeholder="例如：租車 35 分鐘" />
+          </label>
+          <label>
+            <span>行程標籤</span>
+            <input id="stopTags" type="text" placeholder="散步,拍照,彈性" />
+          </label>
+          <label>
+            <span>給長輩看的重點</span>
+            <textarea id="stopSummary" rows="3"></textarea>
+          </label>
+          <label>
+            <span>雨天備案</span>
+            <textarea id="stopRain" rows="3" placeholder="下雨時改去哪裡、怎麼走、注意事項"></textarea>
+          </label>
+          <label>
+            <span>預估花費</span>
+            <input id="stopBudget" type="number" min="0" step="1" placeholder="例如：3200" />
+          </label>
+        </div>
+        <div class="form-section">
+          <label>
+            <span>主要連結名稱</span>
+            <input id="stopLinkLabel" type="text" placeholder="官網、訂位、菜單、店家頁面" />
+          </label>
+          <label>
+            <span>主要連結</span>
+            <input id="stopOfficial" type="url" placeholder="https://..." />
+          </label>
+          <label>
+            <span>Google 地圖連結</span>
+            <input id="stopMaps" type="url" placeholder="https://maps.google.com/..." />
+          </label>
+          <label>
+            <span>緯度,經度</span>
+            <input id="stopCoords" type="text" placeholder="26.6941,127.8780" />
+          </label>
+        </div>
+        <div class="dialog-actions">
+          <button class="danger" id="deleteStopBtn" value="delete" type="submit">刪除</button>
+          <button class="primary" value="save" type="submit">儲存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="dayDialog">
+      <form method="dialog" id="dayForm">
+        <div class="dialog-head">
+          <h2>編輯本日標題</h2>
+          <button class="icon-button dialog-close" value="cancel" type="button" title="關閉">×</button>
+        </div>
+        <label>
+          日期標籤
+          <input id="dayLabel" type="text" />
+        </label>
+        <label>
+          行程標題
+          <input id="dayTitle" type="text" />
+        </label>
+        <div class="dialog-actions">
+          <span></span>
+          <button class="primary" value="save" type="submit">儲存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="hotelDialog">
+      <form method="dialog" id="hotelForm">
+        <div class="dialog-head">
+          <h2>設定住宿</h2>
+          <button class="icon-button dialog-close" value="cancel" type="button" title="關閉">×</button>
+        </div>
+        <label>
+          住宿名稱
+          <input id="hotelName" type="text" />
+        </label>
+        <label>
+          地址
+          <input id="hotelAddress" type="text" />
+        </label>
+        <label>
+          電話
+          <input id="hotelPhone" type="text" />
+        </label>
+        <label>
+          定位連結
+          <input id="hotelMaps" type="url" />
+        </label>
+        <label>
+          備註
+          <textarea id="hotelNote" rows="3"></textarea>
+        </label>
+        <div class="dialog-actions">
+          <span></span>
+          <button class="primary" value="save" type="submit">儲存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="routeDialog">
+      <form method="dialog" id="routeForm">
+        <div class="dialog-head">
+          <h2>設定兩點之間路線</h2>
+          <button class="icon-button dialog-close" value="cancel" type="button" title="關閉">×</button>
+        </div>
+        <p class="form-note">路線會預設產生 Google Maps 連結；若沒有網路，仍可先填交通備註，之後再補連結。</p>
+        <input type="hidden" id="routeFromId" />
+        <div class="form-section">
+          <label>
+            <span>推薦交通 <em class="required-chip">必填</em></span>
+            <select id="routeMode">
+              <option value="driving">開車 / 租車</option>
+              <option value="taxi">計程車</option>
+              <option value="transit">巴士 / 單軌電車</option>
+              <option value="walking">步行</option>
+            </select>
+          </label>
+          <label>
+            <span>交通方式 <em class="required-chip">必填</em></span>
+            <input id="routeTransport" type="text" placeholder="例如：租車 20 分鐘，走國道 58 號" />
+          </label>
+          <label>
+            <span>路線連結</span>
+            <input id="routeUrl" type="url" placeholder="Google Maps 路線網址" />
+          </label>
+          <label>
+            <span>路線備註</span>
+            <textarea id="routeNote" rows="3"></textarea>
+          </label>
+        </div>
+        <div class="dialog-actions">
+          <span></span>
+          <button class="primary" value="save" type="submit">儲存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="expenseDialog">
+      <form method="dialog" id="expenseForm">
+        <div class="dialog-head">
+          <h2>新增花費</h2>
+          <button class="icon-button dialog-close" value="cancel" type="button" title="關閉">×</button>
+        </div>
+        <input type="hidden" id="expenseId" />
+        <label>
+          項目
+          <input id="expenseTitle" type="text" />
+        </label>
+        <label>
+          金額
+          <input id="expenseAmount" type="number" min="0" step="1" />
+        </label>
+        <label>
+          誰先付
+          <select id="expensePayer"></select>
+        </label>
+        <label>
+          分給誰
+          <input id="expensePeople" type="text" placeholder="媽媽,我,家人" />
+        </label>
+        <div class="dialog-actions">
+          <button class="danger" id="deleteExpenseBtn" value="delete" type="submit">刪除</button>
+          <button class="primary" value="save" type="submit">儲存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="peopleDialog">
+      <form method="dialog" id="peopleForm">
+        <div class="dialog-head">
+          <h2>編輯參與人員</h2>
+          <button class="icon-button dialog-close" value="cancel" type="button" title="關閉">×</button>
+        </div>
+        <label>
+          人員名單
+          <input id="peopleNames" type="text" placeholder="媽媽,我,家人" />
+        </label>
+        <p class="muted">用逗號分隔。移除某人後，既有花費也會同步移除他的分攤。</p>
+        <div class="dialog-actions">
+          <span></span>
+          <button class="primary" value="save" type="submit">儲存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="stopViewDialog">
+      <form method="dialog">
+        <div class="dialog-head">
+          <h2 id="viewStopTitle">行程內容</h2>
+          <div class="split-actions">
+            <button class="icon-button" id="editViewedStopBtn" type="button" title="編輯">✎</button>
+            <button class="icon-button dialog-close" value="cancel" type="button" title="關閉">×</button>
+          </div>
+        </div>
+        <input type="hidden" id="viewStopId" />
+        <div class="detail-box" id="viewStopContent"></div>
+      </form>
+    </dialog>
+
+    <dialog id="exportDialog">
+      <form method="dialog" id="exportForm">
+        <div class="dialog-head">
+          <h2>匯出分享文字</h2>
+          <button class="icon-button dialog-close" value="cancel" type="button" title="關閉">×</button>
+        </div>
+        <p class="muted" id="exportStatus">可以直接複製貼到 LINE 或家族群組。</p>
+        <textarea id="exportText" rows="12"></textarea>
+        <div class="dialog-actions">
+          <button id="copyExportBtn" type="button">複製文字</button>
+          <button class="primary" id="nativeShareBtn" type="button">系統分享</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="helpDialog">
+      <form method="dialog">
+        <div class="dialog-head">
+          <h2>定位與安裝說明</h2>
+          <button class="icon-button dialog-close" value="cancel" type="button" title="關閉">×</button>
+        </div>
+        <div class="help-copy">
+          <p><strong>iPhone：</strong>設定 → 隱私權與安全性 → 定位服務，開啟 Safari 或此 app 的定位權限。要安裝到桌面：Safari 分享 → 加入主畫面。</p>
+          <p><strong>Android：</strong>設定 → 位置資訊，並在 Chrome 網站設定允許定位。要安裝到桌面：Chrome 選單 → 安裝應用程式或加到主畫面。</p>
+          <p><strong>電腦：</strong>開啟瀏覽器網址列旁的網站權限，允許定位；macOS/Windows 也要在系統隱私權設定允許瀏覽器使用定位。</p>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="installLinkDialog">
+      <form method="dialog">
+        <div class="dialog-head">
+          <h2>手機安裝連結</h2>
+          <button class="icon-button dialog-close" value="cancel" type="button" title="關閉">×</button>
+        </div>
+        <p class="muted">同一個 Wi‑Fi 下，把這個網址傳到 iPhone 或 Android，用瀏覽器打開後加入主畫面。</p>
+        <textarea id="installShareText" rows="4"></textarea>
+        <div class="dialog-actions">
+          <button id="copyInstallLinkBtn" type="button">複製連結</button>
+          <button class="primary" id="shareInstallLinkBtn" type="button">系統分享</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="syncDialog">
+      <form method="dialog" id="syncForm">
+        <div class="dialog-head">
+          <h2>設定 Supabase 同步</h2>
+          <button class="icon-button dialog-close" value="cancel" type="button" title="關閉">×</button>
+        </div>
+        <p class="form-note">未設定也能離線使用。填入 Supabase 專案後，有網路時會以單筆行程、路線、住宿、花費為單位同步。</p>
+        <div class="form-section">
+          <label>
+            <span>Supabase URL</span>
+            <input id="supabaseUrl" type="url" placeholder="https://xxxx.supabase.co" />
+          </label>
+          <label>
+            <span>Anon Key</span>
+            <input id="supabaseAnonKey" type="password" placeholder="public anon key" autocomplete="off" />
+          </label>
+          <label>
+            <span>旅程 ID</span>
+            <input id="syncTripId" type="text" placeholder="okinawa-family-2026" />
+          </label>
+          <label>
+            <span>我的名字</span>
+            <input id="syncUserName" type="text" placeholder="媽媽、我、家人..." />
+          </label>
+        </div>
+        <div class="dialog-actions">
+          <button id="clearSyncConfigBtn" type="button">清除設定</button>
+          <button class="primary" value="save" type="submit">儲存設定</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="familyLocationDialog">
+      <form method="dialog">
+        <div class="dialog-head">
+          <h2 id="familyLocationTitle">最後定位</h2>
+          <button class="icon-button dialog-close" value="cancel" type="button" title="關閉">×</button>
+        </div>
+        <p class="muted" id="familyLocationMeta"></p>
+        <iframe id="familyLocationFrame" title="家人最後定位地圖" loading="lazy"></iframe>
+      </form>
+    </dialog>
+
+    <dialog id="syncPreviewDialog">
+      <form method="dialog">
+        <div class="dialog-head">
+          <h2>準備同步</h2>
+          <button class="icon-button dialog-close" value="cancel" type="button" title="關閉">×</button>
+        </div>
+        <p class="form-note">以下是這台裝置準備上傳的變更。</p>
+        <div class="sync-preview-list" id="syncPreviewList"></div>
+        <div class="dialog-actions">
+          <button value="cancel" type="button" class="dialog-close">稍後</button>
+          <button class="primary" id="confirmSyncBtn" type="button">確認同步</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="conflictDialog">
+      <form method="dialog">
+        <div class="dialog-head">
+          <h2>同步衝突</h2>
+          <button class="icon-button dialog-close" value="cancel" type="button" title="關閉">×</button>
+        </div>
+        <p class="form-note">同一筆資料被不同家人修改時，請選擇要保留哪一版。</p>
+        <div class="conflict-list" id="conflictList"></div>
+      </form>
+    </dialog>
+
+    <script src="./app.js?v=30"></script>
+  </body>
+</html>
