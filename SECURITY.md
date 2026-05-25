@@ -9,7 +9,7 @@
 - 沒有把 Supabase `service_role` key 放在前端。
 - 使用者輸入顯示到畫面時，大多透過 `escapeHtml()` / `escapeAttr()` 轉義，降低 XSS 風險。
 - 外部連結透過 `normalizeUrl()` 處理；未設定連結會擋下，不會導向奇怪預設地點。
-- Supabase 已啟用 RLS，限制只處理 `trip_id = 'okinawa-family-2026'` 的資料。
+- 新版 migration 會把 Supabase 改成 Email Magic Link 登入，並用 `trip_members` + RLS 限制只有旅程成員可讀寫。
 
 ## 目前仍存在的風險
 
@@ -32,9 +32,9 @@
 - 要求 pull request review 才能 merge。
 - 不要隨便接受陌生人的 PR。
 
-### 2. 現在的 Supabase 設定是「知道網址與 key 的人都能改同一趟旅程」
+### 2. 如果尚未執行新版 migration，Supabase 仍可能是「知道網址與 key 的人都能改同一趟旅程」
 
-目前 App 的 Supabase URL、publishable key、trip id 都在前端。這是靜態網站常見做法，但因為現在沒有登入，任何人如果知道這些資訊，理論上可以呼叫 Supabase API：
+舊版 App 的 Supabase URL、publishable key、trip id 都在前端。這是靜態網站常見做法，但如果還沒有執行 `supabase-auth-normalized-migration.sql`，任何人如果知道這些資訊，理論上可以呼叫 Supabase API：
 
 - 讀取 `okinawa-family-2026` 的行程資料
 - 新增資料
@@ -43,11 +43,11 @@
 
 他們不能用 publishable key 修改資料庫 schema，也不能拿到 service role 權限；但可以破壞或偷看這趟旅行資料。
 
-建議上線前至少擇一：
+新版建議：
 
-- 最安全：加入 Supabase Auth，只有登入的家人可以讀寫。
-- 中等安全：把 repository 設為私密，並只分享 GitHub Pages 網址給家人，但這仍不能防止網址或前端 key 被轉傳。
-- 較簡單但不是完整資安：設定一個旅程邀請碼，資料寫入前檢查雜湊值。這只能防止隨手亂打 API 的人，不能防止看過原始碼的人。
+- 執行 `supabase-auth-normalized-migration.sql`。
+- 在 Supabase Dashboard 開啟 Email provider。
+- 將每位登入過的家人加入 `trip_members`。
 - 出國正式使用前，建議至少把重要個資拿掉，不要放護照、信用卡、完整住址、生日等敏感資料。
 
 ### 3. PWA 快取可能保留舊版或惡意版本
@@ -75,16 +75,16 @@ PWA 會快取 `app.js`、`styles.css` 等檔案，讓 App 離線可用。如果�
 - [ ] GitHub repository 寫入權限只給自己或可信任的人。
 - [ ] main branch 開啟 branch protection。
 - [ ] Supabase 不公開 service role key。
-- [ ] Supabase RLS 保持啟用。
+- [ ] Supabase RLS 保持啟用，並已執行 `supabase-auth-normalized-migration.sql`。
+- [ ] 家人帳號已加入 `trip_members`。
 - [ ] 不把高度敏感個資寫入行程。
 - [ ] 出發前測試 iPhone / Android 都能同步。
 - [ ] 旅程結束後匯出或備份資料，再考慮停用 Supabase 專案或清空資料。
 
 ## 建議的下一階段強化
 
-如果這個 App 會正式給家人長期使用，建議下一版加入 Supabase Auth：
+這一版已開始加入 Supabase Auth。下一階段可再加強：
 
-- 家人用 email magic link 登入。
-- `trip_members` 表記錄哪些 user 可以讀寫哪趟旅程。
-- `trip_records` 的 RLS 改成只允許 `auth.uid()` 在成員名單內的人讀寫。
-- 這樣即使別人看到 publishable key，也不能讀寫你的旅程資料。
+- 在 App 內做 admin 成員管理頁，不必手動進 SQL Editor。
+- 將舊 `trip_records` 完全遷移到正規化表後移除橋接表。
+- 對定位資料加入自動過期或旅程結束後一鍵清除。

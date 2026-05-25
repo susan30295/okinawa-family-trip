@@ -1,3 +1,6 @@
+import { createClient } from "@supabase/supabase-js";
+import Sortable from "sortablejs";
+
 const STORAGE_KEY = "okinawa-family-trip-v2";
 const LEGACY_KEY = "okinawa-family-trip-v1";
 const TRACK_KEY = "okinawa-family-track-v1";
@@ -225,8 +228,20 @@ let touchStartPoint = null;
 let saveTimer = null;
 let syncQueue = loadJson(SYNC_QUEUE_KEY, []);
 let recordMeta = loadJson(RECORD_META_KEY, {});
+let supabaseClient = null;
+let authSession = null;
+let currentMember = null;
+let timelineSortable = null;
+let remoteDayIds = new Map();
+let remoteStopIds = new Map();
+let remoteExpenseIds = new Map();
 
 const els = {
+  authGate: document.querySelector("#authGate"),
+  authForm: document.querySelector("#authForm"),
+  authEmail: document.querySelector("#authEmail"),
+  authStatus: document.querySelector("#authStatus"),
+  currentUserPill: document.querySelector("#currentUserPill"),
   dayTabs: document.querySelector("#dayTabs"),
   timeline: document.querySelector("#timeline"),
   currentStopTitle: document.querySelector("#currentStopTitle"),
@@ -408,8 +423,7 @@ function getDeviceId() {
 }
 
 function syncUserName() {
-  const config = loadSyncConfig();
-  return config.userName || trip?.people?.[0] || getDeviceId();
+  return currentUserId() || currentDisplayName() || trip?.people?.[0] || getDeviceId();
 }
 
 function nowIso() {
@@ -488,8 +502,133 @@ function loadSyncConfig() {
   return config;
 }
 
+function getSupabaseClient() {
+  const config = loadSyncConfig();
+  if (!config.url || !config.anonKey) return null;
+  if (!supabaseClient) {
+    supabaseClient = createClient(config.url, config.anonKey, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true
+      }
+    });
+  }
+  return supabaseClient;
+}
+
+function currentUserId() {
+  return authSession?.user?.id || null;
+}
+
+function currentDisplayName() {
+  return currentMember?.display_name || loadSyncConfig().userName || authSession?.user?.email || "我";
+}
+
+function setAuthStatus(message) {
+  if (els.authStatus) els.authStatus.textContent = message;
+}
+
+function showAuthenticatedApp(show) {
+  els.authGate.hidden = show;
+  document.querySelector(".app-shell").hidden = !show;
+  if (els.currentUserPill) {
+    els.currentUserPill.textContent = show ? `${currentDisplayName()} 已登入` : "未登入";
+  }
+}
+
+async function initAuth() {
+  const client = getSupabaseClient();
+  if (!client) {
+    showAuthenticatedApp(false);
+    setAuthStatus("尚未設定 Supabase，無法使用登入。");
+    return;
+  }
+  const { data } = await client.auth.getSession();
+  authSession = data.session;
+  client.auth.onAuthStateChange(async (_event, session) => {
+    authSession = session;
+    await loadAuthenticatedState();
+  });
+  await loadAuthenticatedState();
+}
+
+async function sendMagicLink(email) {
+  const client = getSupabaseClient();
+  if (!client) throw new Error("Supabase 尚未設定");
+  const { error } = await client.auth.signInWithOtp({
+    email,
+    options: {
+      emailRedirectTo: `${location.origin}${location.pathname}`
+    }
+  });
+  if (error) throw error;
+}
+
+async function signOut() {
+  const client = getSupabaseClient();
+  if (client) await client.auth.signOut();
+  authSession = null;
+  currentMember = null;
+  showAuthenticatedApp(false);
+  setAuthStatus("已登出。");
+}
+
+async function loadAuthenticatedState() {
+  if (!authSession?.user) {
+    currentMember = null;
+    showAuthenticatedApp(false);
+    setAuthStatus("請輸入 Email 取得登入連結。");
+    return;
+  }
+  await ensureProfile();
+  currentMember = await loadTripMember();
+  if (!currentMember) {
+    showAuthenticatedApp(false);
+    setAuthStatus("已登入，但這個 Email 尚未加入此旅程。請到 Supabase 的 trip_members 加入這位使用者。");
+    return;
+  }
+  showAuthenticatedApp(true);
+  setAuthStatus("登入成功。");
+  await loadTripFromSupabase();
+  saveTrip();
+  render();
+  await syncNow(true);
+}
+
+async function ensureProfile() {
+  const client = getSupabaseClient();
+  const user = authSession?.user;
+  if (!client || !user) return;
+  await client.from("profiles").upsert({
+    user_id: user.id,
+    email: user.email,
+    display_name: loadSyncConfig().userName || user.email || "",
+    updated_at: nowIso()
+  });
+}
+
+async function loadTripMember() {
+  const client = getSupabaseClient();
+  const config = loadSyncConfig();
+  const user = authSession?.user;
+  if (!client || !user) return null;
+  const { data, error } = await client
+    .from("trip_members")
+    .select("*")
+    .eq("trip_id", config.tripId)
+    .eq("user_id", user.id)
+    .maybeSingle();
+  if (error) {
+    updateSyncStatus(`讀取成員權限失敗：${error.message}`);
+    return null;
+  }
+  return data;
+}
+
 function saveSyncConfig(config) {
   saveJson(SYNC_CONFIG_KEY, config);
+  supabaseClient = null;
   updateSyncStatus();
 }
 
@@ -605,6 +744,7 @@ function renderTimeline() {
     if (index < day.stops.length - 1) pieces.push(renderRouteConnector(stop, day.stops[index + 1]));
   });
   els.timeline.innerHTML = pieces.join("");
+  initSortableTimeline();
 }
 
 function renderStopCard(stop, index, total) {
@@ -612,7 +752,7 @@ function renderStopCard(stop, index, total) {
   const tags = (stop.tags || []).map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("");
   const mainText = trip.weatherMode === "rain" ? stop.rainPlan : stop.summary;
   return `
-    <article class="stop-card ${active ? "active" : ""}" data-stop="${stop.id}" data-action="select" draggable="true" tabindex="0" aria-label="查看 ${escapeHtml(stop.title)}">
+    <article class="stop-card ${active ? "active" : ""}" data-stop="${stop.id}" data-action="select" tabindex="0" aria-label="查看 ${escapeHtml(stop.title)}">
       <div class="drag-cue" aria-hidden="true" title="長按行程可拖曳排序"><span></span><span></span><span></span></div>
       <input class="time-input" type="time" value="${escapeHtml(stop.time)}" data-action="time" aria-label="調整 ${escapeHtml(stop.title)} 的時間" />
       <div class="stop-main">
@@ -778,6 +918,7 @@ function toggleToolItem(type, id, checked) {
   const item = list?.find((entry) => entry.id === id);
   if (!item) return;
   item.done = checked;
+  persistPersonalItem(type, item).catch((error) => updateSyncStatus(`個人清單同步失敗：${error.message}`));
   saveTrip();
   renderTools();
 }
@@ -785,11 +926,13 @@ function toggleToolItem(type, id, checked) {
 function addShoppingItem() {
   const title = document.querySelector("#shoppingTitle").value.trim();
   const amount = Number(document.querySelector("#shoppingAmount").value || 0);
-  const person = document.querySelector("#shoppingPerson").value.trim() || syncUserName() || "我";
+  const person = currentDisplayName() || document.querySelector("#shoppingPerson").value.trim() || "我";
   if (!title) return;
-  trip.tools.shopping.push({ id: crypto.randomUUID(), person, title, amount, done: false });
+  const item = { id: crypto.randomUUID(), ownerUserId: currentUserId(), person, title, amount, done: false };
+  trip.tools.shopping.push(item);
   document.querySelector("#shoppingTitle").value = "";
   document.querySelector("#shoppingAmount").value = "";
+  persistPersonalItem("shopping", item).catch((error) => updateSyncStatus(`購物清單同步失敗：${error.message}`));
   saveTrip();
   renderTools();
 }
@@ -929,6 +1072,10 @@ function moveStopTo(stopId, targetId) {
   if (from < 0 || to < 0) return;
   const [item] = day.stops.splice(from, 1);
   day.stops.splice(to, 0, item);
+  persistStopOrder(day);
+}
+
+function persistStopOrder(day) {
   day.manualOrder = true;
   day.stops.forEach((stop, index) => {
     stop.order = (index + 1) * 1000;
@@ -950,6 +1097,44 @@ function clearDragState() {
   touchStartPoint = null;
   clearTimeout(touchDragTimer);
   touchDragTimer = null;
+}
+
+function initSortableTimeline() {
+  if (timelineSortable) timelineSortable.destroy();
+  timelineSortable = Sortable.create(els.timeline, {
+    draggable: ".stop-card",
+    handle: ".drag-cue",
+    animation: 180,
+    delay: 180,
+    delayOnTouchOnly: true,
+    ghostClass: "dragging",
+    chosenClass: "pressing",
+    dragClass: "touch-dragging",
+    filter: "input, button, a",
+    preventOnFilter: false,
+    onMove: (event) => event.related?.classList?.contains("stop-card") !== false,
+    onEnd: (event) => {
+      const stopId = event.item?.dataset.stop;
+      const oldIndex = Number.isFinite(event.oldDraggableIndex) ? event.oldDraggableIndex : event.oldIndex;
+      const newIndex = Number.isFinite(event.newDraggableIndex) ? event.newDraggableIndex : event.newIndex;
+      if (!stopId || oldIndex === newIndex) {
+        clearDragState();
+        return;
+      }
+      moveStopToIndex(stopId, newIndex);
+      suppressNextCardClick = true;
+      clearDragState();
+    }
+  });
+}
+
+function moveStopToIndex(stopId, toIndex) {
+  const day = currentDay();
+  const from = day.stops.findIndex((stop) => stop.id === stopId);
+  if (from < 0 || toIndex < 0) return;
+  const [item] = day.stops.splice(from, 1);
+  day.stops.splice(Math.min(toIndex, day.stops.length), 0, item);
+  persistStopOrder(day);
 }
 
 function findTouchDropTarget(y) {
@@ -1042,7 +1227,7 @@ async function copyText(text, message = "已複製連結。") {
 }
 
 async function showInstallLink() {
-  let url = `${location.origin}/?v=30`;
+  let url = `${location.origin}/?v=31`;
   try {
     if (hasLocalCsvApi()) {
       const response = await fetch("/api/install-link");
@@ -1172,6 +1357,203 @@ function buildSyncPreviewItems(queue) {
   }));
 }
 
+async function loadTripFromSupabase() {
+  const client = getSupabaseClient();
+  const config = loadSyncConfig();
+  if (!client || !authSession || !currentMember) return;
+  try {
+    const [daysResult, hotelsResult, stopsResult, routesResult, expensesResult, participantsResult, itemsResult, contactsResult, locationsResult] = await Promise.all([
+      client.from("trip_days").select("*").eq("trip_id", config.tripId).is("deleted_at", null).order("sort_order"),
+      client.from("trip_hotels").select("*").eq("trip_id", config.tripId).is("deleted_at", null),
+      client.from("trip_stops").select("*").eq("trip_id", config.tripId).is("deleted_at", null).order("sort_order"),
+      client.from("trip_routes").select("*").eq("trip_id", config.tripId).is("deleted_at", null),
+      client.from("expenses").select("*").eq("trip_id", config.tripId).is("deleted_at", null),
+      client.from("expense_participants").select("*"),
+      client.from("personal_items").select("*").eq("trip_id", config.tripId).is("deleted_at", null).order("created_at"),
+      client.from("emergency_contacts").select("*").eq("trip_id", config.tripId).is("deleted_at", null).order("sort_order"),
+      client.from("location_points").select("*").eq("trip_id", config.tripId).is("deleted_at", null).order("recorded_at", { ascending: false }).limit(80)
+    ]);
+    const blockingError = [daysResult, hotelsResult, stopsResult, routesResult, expensesResult, itemsResult, contactsResult, locationsResult].find((result) => result.error)?.error;
+    if (blockingError) throw blockingError;
+    if (!daysResult.data?.length) {
+      updateSyncStatus("Supabase 已登入，正在初始化正規化行程資料...");
+      await seedNormalizedTrip();
+      updateSyncStatus("已把目前行程初始化到 Supabase。");
+      return;
+    }
+    trip = tripFromNormalizedRows({
+      days: daysResult.data || [],
+      hotels: hotelsResult.data || [],
+      stops: stopsResult.data || [],
+      routes: routesResult.data || [],
+      expenses: expensesResult.data || [],
+      participants: participantsResult.data || [],
+      items: itemsResult.data || [],
+      contacts: contactsResult.data || [],
+      locations: locationsResult.data || []
+    });
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(trip));
+    saveTrack();
+    updateSyncStatus("已從 Supabase 讀取最新旅程。");
+  } catch (error) {
+    updateSyncStatus(`讀取 Supabase 正規化資料失敗：${error.message || "未知錯誤"}。目前顯示本機快取。`);
+  }
+}
+
+async function seedNormalizedTrip() {
+  const client = getSupabaseClient();
+  if (!client || !authSession || !currentMember) return;
+  for (const [dayIndex, day] of trip.days.entries()) {
+    day.sort_order = (dayIndex + 1) * 1000;
+    await upsertNormalizedDay(client, day);
+    if (day.hotel) await upsertNormalizedHotel(client, day.hotel);
+    for (const [stopIndex, stop] of day.stops.entries()) {
+      stop.order = (stopIndex + 1) * 1000;
+      await upsertNormalizedStop(client, stop);
+    }
+  }
+  for (const expense of trip.expenses) {
+    await upsertNormalizedExpense(client, expense);
+  }
+  for (const item of trip.tools.packing) await persistPersonalItem("packing", { ...item, person: currentDisplayName(), ownerUserId: currentUserId(), title: item.text });
+  for (const item of trip.tools.meds) await persistPersonalItem("meds", { ...item, person: currentDisplayName(), ownerUserId: currentUserId(), title: item.text });
+  for (const item of trip.tools.shopping) await persistPersonalItem("shopping", { ...item, ownerUserId: currentUserId() });
+  await seedEmergencyContacts(client);
+}
+
+async function seedEmergencyContacts(client) {
+  const config = loadSyncConfig();
+  const rows = trip.tools.emergency.map((item, index) => ({
+    trip_id: config.tripId,
+    title: item.title,
+    value: item.value,
+    note: item.note || "",
+    sort_order: (index + 1) * 1000,
+    updated_by: currentUserId()
+  }));
+  if (!rows.length) return;
+  const { error } = await client.from("emergency_contacts").upsert(rows, { onConflict: "trip_id,title" });
+  if (error && error.code !== "23505") throw error;
+}
+
+function tripFromNormalizedRows(rows) {
+  remoteDayIds = new Map(rows.days.map((day) => [day.legacy_id || day.id, day.id]));
+  remoteStopIds = new Map(rows.stops.map((stop) => [stop.legacy_id || stop.id, stop.id]));
+  remoteExpenseIds = new Map(rows.expenses.map((expense) => [expense.legacy_id || expense.id, expense.id]));
+  const routesByStop = new Map(rows.routes.map((route) => [route.legacy_from_stop_id || route.from_stop_id, route]));
+  const hotelsByDay = new Map(rows.hotels.map((hotel) => [hotel.legacy_day_id || hotel.day_id, hotel]));
+  const stopsByDay = new Map();
+  rows.stops.forEach((stop) => {
+    const dayKey = stop.legacy_day_id || stop.day_id;
+    if (!stopsByDay.has(dayKey)) stopsByDay.set(dayKey, []);
+    stopsByDay.get(dayKey).push(stop);
+  });
+  const people = rows.participants?.length
+    ? [...new Set(rows.participants.map((item) => item.person_name).filter(Boolean))]
+    : [currentDisplayName()];
+  const nextTrip = structuredClone(defaultTrip);
+  nextTrip.people = people.length ? people : [currentDisplayName()];
+  nextTrip.familyLocations = latestLocationsByPerson(rows.locations);
+  nextTrip.days = rows.days.map((day) => {
+    const dayKey = day.legacy_id || day.id;
+    const hotel = hotelsByDay.get(dayKey);
+    const stops = (stopsByDay.get(dayKey) || []).map((stop) => normalizedStop(stop, routesByStop.get(stop.legacy_id || stop.id)));
+    return {
+      id: day.legacy_id || day.id,
+      label: day.label,
+      date: day.title,
+      manualOrder: true,
+      hotel: hotel
+        ? {
+            id: hotel.id,
+            name: hotel.name || "",
+            address: hotel.address || "",
+            phone: hotel.phone || "",
+            maps: hotel.maps_url || "",
+            note: hotel.note || ""
+          }
+        : structuredClone(defaultTrip.days[0].hotel),
+      stops
+    };
+  });
+  nextTrip.expenses = rows.expenses.map((expense) => ({
+    id: expense.legacy_id || expense.id,
+    title: expense.title,
+    amount: Number(expense.amount || 0),
+    payer: expense.payer_name || currentDisplayName(),
+    people: rows.participants.filter((item) => item.expense_id === expense.id).map((item) => item.person_name)
+  }));
+  nextTrip.tools = toolsFromPersonalItems(rows.items, rows.contacts);
+  nextTrip.selectedDay = nextTrip.days[0]?.id || "day1";
+  nextTrip.selectedStopId = nextTrip.days[0]?.stops?.[0]?.id || "";
+  return migrateTrip(nextTrip);
+}
+
+function normalizedStop(stop, route) {
+  return {
+    id: stop.legacy_id || stop.id,
+    time: stop.stop_time ? String(stop.stop_time).slice(0, 5) : "12:00",
+    title: stop.title,
+    transport: stop.transport || "",
+    summary: stop.summary || "",
+    rainPlan: stop.rain_plan || "",
+    tags: stop.tags || [],
+    budget: Number(stop.budget || 0),
+    linkLabel: stop.link_label || "",
+    official: stop.official_url || "",
+    maps: stop.maps_url || "",
+    coords: stop.lat && stop.lng ? [Number(stop.lat), Number(stop.lng)] : null,
+    order: Number(stop.sort_order || 1000),
+    routeToNext: {
+      id: route?.id || `${stop.legacy_id || stop.id}-route`,
+      transport: route?.transport || "",
+      mode: route?.mode || "driving",
+      url: route?.route_url || "",
+      note: route?.note || ""
+    }
+  };
+}
+
+function toolsFromPersonalItems(items, contacts) {
+  const byType = (type) =>
+    items
+      .filter((item) => item.item_type === type)
+      .map((item) => ({
+        id: item.id,
+        ownerUserId: item.owner_user_id,
+        person: item.owner_name,
+        text: item.title,
+        title: item.title,
+        amount: Number(item.amount || 0),
+        done: Boolean(item.done)
+      }));
+  return {
+    packing: byType("packing"),
+    meds: byType("meds"),
+    shopping: byType("shopping"),
+    emergency: contacts.length
+      ? contacts.map((item) => ({ id: item.id, title: item.title, value: item.value, note: item.note || "" }))
+      : structuredClone(defaultTrip.tools.emergency)
+  };
+}
+
+function latestLocationsByPerson(locations) {
+  const seen = new Set();
+  const result = [];
+  locations.forEach((item) => {
+    if (seen.has(item.owner_user_id)) return;
+    seen.add(item.owner_user_id);
+    result.push({
+      person: item.display_name,
+      lat: Number(item.lat),
+      lng: Number(item.lng),
+      time: new Date(item.recorded_at).toLocaleString("zh-TW", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }),
+      note: item.note || `精準度約 ${Math.round(Number(item.accuracy || 0))} 公尺`
+    });
+  });
+  return result.length ? result.slice(0, 4) : structuredClone(defaultTrip.familyLocations);
+}
+
 function readableRecordTitle(item) {
   const data = item.data || {};
   const entityName = {
@@ -1238,6 +1620,7 @@ async function pushQueuedRows(config) {
     version: mutation.version
   }));
   if (!rows.length) return;
+  await pushNormalizedMutations([...merged.values()]);
   const response = await fetch(`${config.url}/rest/v1/trip_records?on_conflict=trip_id,entity,record_id`, {
     method: "POST",
     headers: { ...supabaseHeaders(config), Prefer: "resolution=merge-duplicates" },
@@ -1247,11 +1630,223 @@ async function pushQueuedRows(config) {
 }
 
 function supabaseHeaders(config) {
+  const token = authSession?.access_token || config.anonKey;
   return {
     apikey: config.anonKey,
-    Authorization: `Bearer ${config.anonKey}`,
+    Authorization: `Bearer ${token}`,
     "Content-Type": "application/json"
   };
+}
+
+async function pushNormalizedMutations(mutations) {
+  const client = getSupabaseClient();
+  if (!client || !authSession || !currentMember || !navigator.onLine) return;
+  for (const mutation of mutations) {
+    await pushNormalizedMutation(client, mutation);
+  }
+}
+
+async function pushNormalizedMutation(client, mutation) {
+  if (mutation.entity === "day") return upsertNormalizedDay(client, mutation.data, mutation.op);
+  if (mutation.entity === "stop") return upsertNormalizedStop(client, mutation.data, mutation.op);
+  if (mutation.entity === "route") return upsertNormalizedRoute(client, mutation.data, mutation.op);
+  if (mutation.entity === "hotel") return upsertNormalizedHotel(client, mutation.data, mutation.op);
+  if (mutation.entity === "expense") return upsertNormalizedExpense(client, mutation.data, mutation.op);
+  return null;
+}
+
+async function upsertNormalizedDay(client, day, op = "update") {
+  const config = loadSyncConfig();
+  const remoteId = remoteDayIds.get(day.id);
+  const row = {
+    trip_id: config.tripId,
+    legacy_id: day.id,
+    label: day.label || "",
+    title: day.date || "",
+    sort_order: day.sort_order || orderForLegacyId(trip.days, day.id),
+    updated_at: nowIso(),
+    updated_by: currentUserId(),
+    deleted_at: op === "delete" ? nowIso() : null,
+    version: Number(day.version || 1)
+  };
+  const query = remoteId ? client.from("trip_days").update(row).eq("id", remoteId).select("id").single() : client.from("trip_days").upsert(row, { onConflict: "trip_id,legacy_id" }).select("id").single();
+  const { data, error } = await query;
+  if (error) throw error;
+  if (data?.id) remoteDayIds.set(day.id, data.id);
+}
+
+async function upsertNormalizedHotel(client, hotel, op = "update") {
+  const config = loadSyncConfig();
+  const day = trip.days.find((item) => item.hotel === hotel || item.hotel?.id === hotel.id) || currentDay();
+  await ensureRemoteDay(client, day);
+  const row = {
+    trip_id: config.tripId,
+    day_id: remoteDayIds.get(day.id),
+    legacy_day_id: day.id,
+    name: hotel.name || "",
+    address: hotel.address || "",
+    phone: hotel.phone || "",
+    maps_url: hotel.maps || "",
+    note: hotel.note || "",
+    updated_at: nowIso(),
+    updated_by: currentUserId(),
+    deleted_at: op === "delete" ? nowIso() : null,
+    version: Number(hotel.version || 1)
+  };
+  const { error } = await client.from("trip_hotels").upsert(row, { onConflict: "trip_id,legacy_day_id" });
+  if (error) throw error;
+}
+
+async function upsertNormalizedStop(client, stop, op = "update") {
+  const config = loadSyncConfig();
+  const day = trip.days.find((item) => item.stops.some((candidate) => candidate.id === stop.id)) || currentDay();
+  await ensureRemoteDay(client, day);
+  const remoteId = remoteStopIds.get(stop.id);
+  const row = {
+    trip_id: config.tripId,
+    day_id: remoteDayIds.get(day.id),
+    legacy_id: stop.id,
+    legacy_day_id: day.id,
+    stop_time: stop.time || null,
+    title: stop.title || "未命名行程",
+    transport: stop.transport || "",
+    summary: stop.summary || "",
+    rain_plan: stop.rainPlan || "",
+    tags: stop.tags || [],
+    budget: Number(stop.budget || 0),
+    link_label: stop.linkLabel || "",
+    official_url: stop.official || "",
+    maps_url: stop.maps || "",
+    lat: Array.isArray(stop.coords) ? stop.coords[0] : null,
+    lng: Array.isArray(stop.coords) ? stop.coords[1] : null,
+    sort_order: Number(stop.order || orderForLegacyId(day.stops, stop.id)),
+    updated_at: nowIso(),
+    updated_by: currentUserId(),
+    deleted_at: op === "delete" ? nowIso() : null,
+    version: Number(stop.version || 1)
+  };
+  const query = remoteId ? client.from("trip_stops").update(row).eq("id", remoteId).select("id").single() : client.from("trip_stops").upsert(row, { onConflict: "trip_id,legacy_id" }).select("id").single();
+  const { data, error } = await query;
+  if (error) throw error;
+  if (data?.id) remoteStopIds.set(stop.id, data.id);
+  if (op !== "update-no-route" && stop.routeToNext) await upsertNormalizedRoute(client, stop.routeToNext, "update", stop);
+}
+
+async function upsertNormalizedRoute(client, route, op = "update", sourceStop = null) {
+  const config = loadSyncConfig();
+  const stop = sourceStop || trip.days.flatMap((day) => day.stops).find((item) => item.routeToNext === route || item.routeToNext?.id === route.id);
+  if (!stop) return;
+  await upsertNormalizedStop(client, stop, "update-no-route");
+  const day = trip.days.find((item) => item.stops.some((candidate) => candidate.id === stop.id));
+  const index = day?.stops.findIndex((item) => item.id === stop.id) ?? -1;
+  const nextStop = index >= 0 ? day.stops[index + 1] : null;
+  if (nextStop) await ensureRemoteStop(client, nextStop);
+  const row = {
+    trip_id: config.tripId,
+    from_stop_id: remoteStopIds.get(stop.id),
+    to_stop_id: nextStop ? remoteStopIds.get(nextStop.id) : null,
+    legacy_from_stop_id: stop.id,
+    transport: route.transport || "",
+    mode: route.mode || "driving",
+    route_url: route.url || "",
+    note: route.note || "",
+    updated_at: nowIso(),
+    updated_by: currentUserId(),
+    deleted_at: op === "delete" ? nowIso() : null,
+    version: Number(route.version || 1)
+  };
+  const { error } = await client.from("trip_routes").upsert(row, { onConflict: "trip_id,legacy_from_stop_id" });
+  if (error) throw error;
+}
+
+async function upsertNormalizedExpense(client, expense, op = "update") {
+  const config = loadSyncConfig();
+  const remoteId = remoteExpenseIds.get(expense.id);
+  const row = {
+    trip_id: config.tripId,
+    legacy_id: expense.id,
+    title: expense.title || "未命名花費",
+    amount: Number(expense.amount || 0),
+    payer_name: expense.payer || "",
+    updated_at: nowIso(),
+    updated_by: currentUserId(),
+    deleted_at: op === "delete" ? nowIso() : null,
+    version: Number(expense.version || 1)
+  };
+  const query = remoteId ? client.from("expenses").update(row).eq("id", remoteId).select("id").single() : client.from("expenses").upsert(row, { onConflict: "trip_id,legacy_id" }).select("id").single();
+  const { data, error } = await query;
+  if (error) throw error;
+  const expenseId = data?.id || remoteId;
+  if (expenseId) {
+    remoteExpenseIds.set(expense.id, expenseId);
+    await client.from("expense_participants").delete().eq("expense_id", expenseId);
+    if (op !== "delete") {
+      const people = (expense.people?.length ? expense.people : trip.people).map((person) => ({ expense_id: expenseId, person_name: person }));
+      if (people.length) {
+        const { error: participantError } = await client.from("expense_participants").insert(people);
+        if (participantError) throw participantError;
+      }
+    }
+  }
+}
+
+async function ensureRemoteDay(client, day) {
+  if (remoteDayIds.has(day.id)) return;
+  await upsertNormalizedDay(client, day);
+}
+
+async function ensureRemoteStop(client, stop) {
+  if (remoteStopIds.has(stop.id)) return;
+  await upsertNormalizedStop(client, stop, "update-no-route");
+}
+
+async function persistPersonalItem(type, item) {
+  const client = getSupabaseClient();
+  const config = loadSyncConfig();
+  if (!client || !authSession || !currentMember || !navigator.onLine) return;
+  const row = {
+    id: isUuid(item.id) ? item.id : undefined,
+    trip_id: config.tripId,
+    owner_user_id: item.ownerUserId || currentUserId(),
+    owner_name: item.person || currentDisplayName(),
+    item_type: type,
+    title: item.title || item.text || "未命名項目",
+    amount: Number(item.amount || 0),
+    done: Boolean(item.done),
+    updated_at: nowIso(),
+    updated_by: currentUserId(),
+    version: Number(item.version || 1)
+  };
+  const { data, error } = await client.from("personal_items").upsert(row).select("id").single();
+  if (error) throw error;
+  if (data?.id) item.id = data.id;
+}
+
+async function persistLocationPoint(point) {
+  const client = getSupabaseClient();
+  const config = loadSyncConfig();
+  if (!client || !authSession || !currentMember || !navigator.onLine) return;
+  const { error } = await client.from("location_points").insert({
+    trip_id: config.tripId,
+    owner_user_id: currentUserId(),
+    display_name: currentDisplayName(),
+    lat: point.lat,
+    lng: point.lng,
+    accuracy: point.accuracy,
+    recorded_at: point.time,
+    note: `精準度約 ${Math.round(Number(point.accuracy || 0))} 公尺`,
+    updated_by: currentUserId()
+  });
+  if (error) throw error;
+}
+
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
+}
+
+function orderForLegacyId(items, id) {
+  const index = items.findIndex((item) => item.id === id);
+  return (index + 1) * 1000;
 }
 
 function findConflicts(remoteRows) {
@@ -1432,7 +2027,7 @@ function startTracking() {
         accuracy: position.coords.accuracy,
         time: new Date().toISOString()
       });
-      const currentPerson = syncUserName();
+      const currentPerson = currentDisplayName();
       const latest = trackPoints[trackPoints.length - 1];
       const personLocation = trip.familyLocations.find((item) => item.person === currentPerson) || trip.familyLocations[0];
       if (personLocation) {
@@ -1442,6 +2037,7 @@ function startTracking() {
         personLocation.note = `精準度約 ${Math.round(position.coords.accuracy)} 公尺`;
       }
       saveTrack();
+      persistLocationPoint(latest).catch((error) => updateSyncStatus(`定位同步失敗：${error.message}`));
       els.trackStatus.textContent = `精準度約 ${Math.round(position.coords.accuracy)} 公尺`;
       renderTrack();
     },
@@ -1757,53 +2353,6 @@ els.timeline.addEventListener("click", (event) => {
   if (action === "edit") openEditor(stop);
 });
 
-els.timeline.addEventListener("pointerdown", (event) => {
-  if (event.pointerType === "touch") return;
-  const card = event.target.closest(".stop-card");
-  if (!card || event.target.closest("input, button, a")) {
-    pointerDown = null;
-    return;
-  }
-  pointerDown = { id: card.dataset.stop, x: event.clientX, y: event.clientY, dragging: false };
-});
-
-els.timeline.addEventListener("pointermove", (event) => {
-  if (event.pointerType === "touch") return;
-  if (!pointerDown || event.target.closest("input, button, a")) return;
-  const moved = Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y);
-  if (moved < 12) return;
-  pointerDown.dragging = true;
-  const currentCard = document.querySelector(`.stop-card[data-stop="${CSS.escape(pointerDown.id)}"]`);
-  currentCard?.classList.add("dragging");
-  const target = document.elementFromPoint(event.clientX, event.clientY)?.closest(".stop-card");
-  if (!target || target.dataset.stop === pointerDown.id) return;
-  pointerDropTarget?.classList.remove("drop-target");
-  pointerDropTarget = target;
-  pointerDropTarget.classList.add("drop-target");
-});
-
-els.timeline.addEventListener("pointerup", (event) => {
-  if (event.pointerType === "touch") return;
-  if (!pointerDown) return;
-  const dragged = pointerDown.dragging;
-  const draggedId = pointerDown.id;
-  const startX = pointerDown.x;
-  const startY = pointerDown.y;
-  const targetId = pointerDropTarget?.dataset.stop || null;
-  const card = document.querySelector(`.stop-card[data-stop="${CSS.escape(draggedId)}"]`);
-  const moved = Math.hypot(event.clientX - startX, event.clientY - startY);
-  clearDragState();
-  if (dragged && targetId) {
-    moveStopTo(draggedId, targetId);
-    suppressNextCardClick = true;
-    return;
-  }
-  if (moved > 8) return;
-  if (event.target.closest("input, button, a")) return;
-  const stop = currentDay().stops.find((item) => item.id === card?.dataset.stop);
-  if (stop) openStopView(stop);
-});
-
 els.timeline.addEventListener("change", (event) => {
   if (!event.target.matches(".time-input")) return;
   const card = event.target.closest(".stop-card");
@@ -1817,95 +2366,6 @@ els.timeline.addEventListener("keydown", (event) => {
   event.preventDefault();
   const stop = currentDay().stops.find((item) => item.id === card.dataset.stop);
   if (stop) openStopView(stop);
-});
-
-els.timeline.addEventListener("dragstart", (event) => {
-  const card = event.target.closest(".stop-card");
-  if (!card) return;
-  if (event.target.closest("input, button, a")) {
-    event.preventDefault();
-    return;
-  }
-  event.dataTransfer.setData("text/plain", card.dataset.stop);
-  card.classList.add("dragging");
-});
-
-els.timeline.addEventListener("dragend", (event) => {
-  event.target.closest(".stop-card")?.classList.remove("dragging");
-  document.querySelectorAll(".stop-card.drop-target").forEach((card) => card.classList.remove("drop-target"));
-  pointerDropTarget = null;
-});
-
-els.timeline.addEventListener("dragover", (event) => {
-  const target = event.target.closest(".stop-card");
-  if (!target) return;
-  event.preventDefault();
-  document.querySelectorAll(".stop-card.drop-target").forEach((card) => {
-    if (card !== target) card.classList.remove("drop-target");
-  });
-  target.classList.add("drop-target");
-});
-
-els.timeline.addEventListener("drop", (event) => {
-  const target = event.target.closest(".stop-card");
-  if (!target) return;
-  event.preventDefault();
-  target.classList.remove("drop-target");
-  pointerDropTarget = null;
-  moveStopTo(event.dataTransfer.getData("text/plain"), target.dataset.stop);
-});
-
-els.timeline.addEventListener(
-  "touchstart",
-  (event) => {
-    if (event.target.closest("input, button, a")) return;
-    const card = event.target.closest(".stop-card");
-    if (!card) return;
-    const touch = event.touches[0];
-    const rect = card.getBoundingClientRect();
-    touchStartPoint = { x: touch.clientX, y: touch.clientY, cardTop: rect.top };
-    card.classList.add("pressing");
-    clearTimeout(touchDragTimer);
-    touchDragTimer = setTimeout(() => {
-      touchDragId = card.dataset.stop;
-      card.classList.remove("pressing");
-      card.classList.add("dragging", "touch-dragging");
-      if (navigator.vibrate) navigator.vibrate(25);
-    }, event.target.closest(".drag-cue") ? 160 : 420);
-  },
-  { passive: true }
-);
-
-els.timeline.addEventListener(
-  "touchmove",
-  (event) => {
-    const touch = event.touches[0];
-    if (!touchDragId && touchStartPoint) {
-      const moved = Math.hypot(touch.clientX - touchStartPoint.x, touch.clientY - touchStartPoint.y);
-      if (moved > 10) {
-        clearTimeout(touchDragTimer);
-        touchDragTimer = null;
-        document.querySelector(".stop-card.pressing")?.classList.remove("pressing");
-        touchStartPoint = null;
-      }
-      return;
-    }
-    if (!touchDragId) return;
-    event.preventDefault();
-    const target = findTouchDropTarget(touch.clientY);
-    if (!target || target.dataset.stop === touchDragId) return;
-    touchDropTarget?.classList.remove("drop-target");
-    touchDropTarget = target;
-    touchDropTarget.classList.add("drop-target");
-  },
-  { passive: false }
-);
-
-els.timeline.addEventListener("touchend", () => {
-  const draggedId = touchDragId;
-  const targetId = touchDropTarget?.dataset.stop;
-  clearDragState();
-  if (draggedId && targetId) moveStopTo(draggedId, targetId);
 });
 
 els.stopForm.addEventListener("submit", (event) => {
@@ -2052,6 +2512,19 @@ document.querySelector("#clearTrackBtn").addEventListener("click", () => {
   saveTrack();
   renderTrack();
 });
+els.authForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const email = els.authEmail.value.trim();
+  if (!email) return;
+  setAuthStatus("正在寄送登入連結...");
+  try {
+    await sendMagicLink(email);
+    setAuthStatus("登入連結已寄出，請到信箱點擊連結後回到 App。");
+  } catch (error) {
+    setAuthStatus(`寄送失敗：${error.message || "未知錯誤"}`);
+  }
+});
+document.querySelector("#logoutBtn")?.addEventListener("click", signOut);
 document.querySelector("#largeTextBtn").addEventListener("click", () => {
   trip.textSize = trip.textSize === "normal" ? "large" : trip.textSize === "large" ? "huge" : "normal";
   saveTrip();
@@ -2092,8 +2565,7 @@ if ("serviceWorker" in navigator) {
 
 async function initApp() {
   await loadTripFromCsv();
-  saveTrip();
-  render();
+  await initAuth();
 }
 
 initApp();

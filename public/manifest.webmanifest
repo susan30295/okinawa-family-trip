@@ -9,7 +9,7 @@
   "description": "給家人一起檢視、調整與分享沖繩旅行行程的 app。",
   "icons": [
     {
-      "src": "../icon.svg",
+      "src": "./icon.svg",
       "sizes": "any",
       "type": "image/svg+xml",
       "purpose": "any maskable"

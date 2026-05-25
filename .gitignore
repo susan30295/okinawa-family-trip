@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.DS_Store
+.vite/
+*.log
+data/
+*.zip
+qa-mobile-*.png
+okinawa-family-trip-offline-pwa/

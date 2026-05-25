@@ -12,6 +12,7 @@
 - 花費記錄與分帳
 - 行李、藥品、購物清單與緊急資訊
 - 手機 PWA 安裝，支援 iPhone / Android
+- Email Magic Link 登入與 Supabase RLS 成員權限
 - 本機離線儲存，有網路時同步到 Supabase
 - 同步衝突提示，可以選擇保留自己的版本或雲端版本
 
@@ -35,43 +36,33 @@
 
 建議建立一個新的 GitHub repository，例如 `okinawa-family-trip`，不要推到其他既有專案。
 
-要放到 repository 根目錄的檔案：
-
-- `index.html`
-- `styles.css`
-- `app.js`
-- `manifest.webmanifest`
-- `service-worker.js`
-- `icon.svg`
-- `supabase-setup.sql`
-- `.nojekyll`
-- `README.md`
+專案使用 Vite，請把整個專案根目錄推到 GitHub，包含 `package.json`、`package-lock.json`、`vite.config.js`、`public/` 和 `.github/workflows/deploy.yml`。
 
 部署步驟：
 
 1. 把檔案推到 GitHub repository 的 `main` branch。
 2. 到 GitHub repository 的 `Settings`。
 3. 左側選 `Pages`。
-4. `Build and deployment` 選 `Deploy from a branch`。
-5. Branch 選 `main`，資料夾選 `/ (root)`。
+4. `Build and deployment` 的 Source 選 `GitHub Actions`。
+5. Push 後等待 `Deploy GitHub Pages` workflow 成功。
 6. 按 `Save`。
 7. 等 GitHub Pages 建置完成後，開啟：
 
 ```text
-https://你的帳號.github.io/okinawa-family-trip/?v=30
+https://你的帳號.github.io/okinawa-family-trip/?v=31
 ```
 
 更完整的部署筆記請看 [GITHUB_PAGES_DEPLOY.md](./GITHUB_PAGES_DEPLOY.md)。
 
 ## Supabase 設定
 
-Supabase 用來讓家人之間同步行程資料。請在 Supabase 專案的 SQL Editor 執行：
+Supabase 用來讓家人之間同步行程資料。新版請在 Supabase 專案的 SQL Editor 執行：
 
 ```sql
--- 使用本專案的 supabase-setup.sql
+-- 使用本專案的 supabase-auth-normalized-migration.sql
 ```
 
-也就是把 [supabase-setup.sql](./supabase-setup.sql) 的內容貼上執行。它會建立 `trip_records` 資料表，並設定只允許同步 `okinawa-family-2026` 這趟旅程的 RLS policy。
+也就是把 [supabase-auth-normalized-migration.sql](./supabase-auth-normalized-migration.sql) 的內容貼上執行。它會建立 Auth/RLS 所需的成員表與第一階段正規化資料表，並把舊的 `trip_records` 改成 authenticated-only。
 
 目前 App 使用：
 
@@ -87,16 +78,17 @@ Trip ID: okinawa-family-2026
 在這個資料夾執行：
 
 ```bash
-python3 server.py
+npm install
+npm run dev
 ```
 
 開啟：
 
 ```text
-http://localhost:4173/?v=30
+http://localhost:4173/?v=31
 ```
 
-本機模式會額外使用 `data/trip-state.csv` 做快速備份；部署到 GitHub Pages 後不會使用這個本機 CSV API，公開版本會使用瀏覽器本機儲存與 Supabase。
+本機開發會由 Vite 提供 dev server；正式部署則由 GitHub Actions build `dist/` 到 GitHub Pages。
 
 ## 檔案說明
 
@@ -105,8 +97,9 @@ http://localhost:4173/?v=30
 - `app.js`：行程、同步、定位、分帳與互動邏輯
 - `manifest.webmanifest`：PWA 安裝設定
 - `service-worker.js`：離線快取
-- `server.py`：本機開發伺服器
 - `supabase-setup.sql`：Supabase 資料表與 RLS 設定
+- `supabase-auth-normalized-migration.sql`：Auth、成員權限與正規化表 migration
+- `SUPABASE_AUTH_SETUP.md`：Supabase Email Magic Link、RLS 與成員設定教學
 - `GITHUB_PAGES_DEPLOY.md`：GitHub Pages 部署步驟
 - `SECURITY.md`：資安風險、上線檢查與建議防護
 
